@@ -1,5 +1,5 @@
 # Drawer Controller
-[![Version Status](http://img.shields.io/cocoapods/v/DrawerController.png)](http://cocoadocs.org/docsets/DrawerController/4.0.0/) [![license MIT](http://img.shields.io/badge/license-MIT-orange.png)](http://opensource.org/licenses/MIT) [![Carthage compatible](https://img.shields.io/badge/Carthage-compatible-4BC51D.svg?style=flat)](https://github.com/Carthage/Carthage) [![Swift 5 compatible](https://img.shields.io/badge/<LABEL>-<MESSAGE>-<COLOR>.svg)](https://github.com/apple/swift-evolution)
+[![Version Status](http://img.shields.io/cocoapods/v/DrawerController.png)](http://cocoadocs.org/docsets/DrawerController/4.0.0/) [![license MIT](http://img.shields.io/badge/license-MIT-orange.png)](http://opensource.org/licenses/MIT) [![Carthage compatible](https://img.shields.io/badge/Carthage-compatible-4BC51D.svg?style=flat)](https://github.com/Carthage/Carthage) [![Swift 5 compatible](https://img.shields.io/badge/swift5-compatible-green.svg)](https://github.com/apple/swift-evolution)
 
 `DrawerController` is a swift version of the popular `MMDrawerController` by [Mutual Mobile](https://github.com/mutualmobile/MMDrawerController).
 
