@@ -887,7 +887,7 @@ open class DrawerController: UIViewController, UIGestureRecognizerDelegate {
         if let oldCenterViewController = self._centerViewController {
             oldCenterViewController.willMove(toParent: nil)
 
-            oldCenterViewController.beginAppearanceTransition(false, animated: false)
+            oldCenterViewController.beginAppearanceTransition(false, animated: animated)
 
             oldCenterViewController.removeFromParent()
             oldCenterViewController.view.removeFromSuperview()
