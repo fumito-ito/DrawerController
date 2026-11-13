@@ -458,6 +458,23 @@ open class DrawerController: UIViewController, UIGestureRecognizerDelegate {
         }
     }
 
+    /// Returns the x direction toward the vertical bar's edge.
+    fileprivate func directionTowardVerticalBarEdge() -> CGFloat {
+        guard #available(iOS 27.1, *) else {
+            return 1.0
+        }
+
+        let isRightToLeft = self.view.effectiveUserInterfaceLayoutDirection == .rightToLeft
+        switch self.traitCollection.verticalBarEdge {
+        case .leading:
+            return isRightToLeft ? 1.0 : -1.0
+        case .trailing:
+            return isRightToLeft ? -1.0 : 1.0
+        default:
+            return 1.0
+        }
+    }
+
     /// Nudges the center frames with the transform removed so UIKit evaluates their layout again.
     /// Nudging only the container is not enough for UIKit to restore the vertical bar while the drawer is open.
     fileprivate func reevaluateLayout() {
@@ -470,6 +487,9 @@ open class DrawerController: UIViewController, UIGestureRecognizerDelegate {
             self.isReevaluatingLayout = false
         }
 
+        // Nudging away from the vertical bar's edge suppresses the bar for a moment, which also shows bars hidden on scroll.
+        // While open, that suppression is what makes UIKit restore the bar. After closing, nudge toward the edge instead.
+        let nudgeX: CGFloat = self.openSide == .none ? self.directionTowardVerticalBarEdge() : 1.0
         let centerView: UIView = centerViewController.view
         UIView.performWithoutAnimation {
             let currentTransform = self.centerContainerView.layer.transform
@@ -477,7 +497,7 @@ open class DrawerController: UIViewController, UIGestureRecognizerDelegate {
 
             func nudge(_ view: UIView) {
                 let originalFrame = view.frame
-                view.frame = originalFrame.offsetBy(dx: 1.0, dy: 0.0)
+                view.frame = originalFrame.offsetBy(dx: nudgeX, dy: 0.0)
                 view.layoutIfNeeded()
                 view.frame = originalFrame
             }
