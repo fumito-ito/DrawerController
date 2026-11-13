@@ -291,7 +291,7 @@ open class DrawerController: UIViewController, UIGestureRecognizerDelegate {
      */
     open var visibleLeftDrawerWidth: CGFloat {
         get {
-            return max(0.0, self.centerContainerView.frame.minX)
+            return max(0.0, self.centerOffsetX)
         }
     }
 
@@ -302,11 +302,7 @@ open class DrawerController: UIViewController, UIGestureRecognizerDelegate {
      */
     open var visibleRightDrawerWidth: CGFloat {
         get {
-            if self.centerContainerView.frame.minX < 0 {
-                return self.childControllerContainerView.bounds.width - self.centerContainerView.frame.maxX
-            } else {
-                return 0.0
-            }
+            return max(0.0, -self.centerOffsetX)
         }
     }
 
@@ -363,6 +359,202 @@ open class DrawerController: UIViewController, UIGestureRecognizerDelegate {
         return centerContainerView
     }()
 
+    fileprivate enum CenterMovementMode {
+        case frame
+        case transform
+    }
+
+    fileprivate var centerMovementMode: CenterMovementMode = .frame
+
+    fileprivate var centerOffsetX: CGFloat {
+        get {
+            switch self.centerMovementMode {
+            case .frame:
+                return self.centerContainerView.frame.minX
+            case .transform:
+                return self.centerContainerView.layer.transform.m41
+            }
+        }
+        set {
+            switch self.centerMovementMode {
+            case .frame:
+                var newFrame = self.childControllerContainerView.bounds
+                newFrame.origin.x = newValue
+                self.centerContainerView.frame = newFrame
+            case .transform:
+                self.centerContainerView.layer.transform = CATransform3DMakeTranslation(newValue, 0.0, 0.0)
+            }
+        }
+    }
+
+    /// Re-applies the current offset with the new mode when the mode changes.
+    fileprivate func updateCenterMovementMode(for drawerSide: DrawerSide) {
+        let newMode = self.resolveCenterMovementMode(for: drawerSide)
+        guard newMode != self.centerMovementMode else {
+            return
+        }
+
+        let offsetX = self.centerOffsetX
+        self.centerContainerView.layer.transform = CATransform3DIdentity
+        self.centerContainerView.frame = self.childControllerContainerView.bounds
+        self.centerMovementMode = newMode
+        self.centerOffsetX = offsetX
+    }
+
+    // Vertical bar support needs the iOS 27.1 SDK (UIKit 9127.0.85), the first to provide verticalBarEdge.
+    // With older SDKs the center view always moves by frame, as before.
+    #if canImport(UIKit, _version: 9127.0.85)
+
+    fileprivate var isReevaluatingLayout = false
+    fileprivate var isLayoutReevaluationScheduled = false
+    fileprivate var centerTraitChangeRegistration: Any?
+
+    /// UIKit suppresses the vertical bar when the center view's frame moves away from the bar's edge, but ignores layer.transform.
+    /// Use transform only in that case so UIKit still updates layout on close otherwise.
+    fileprivate func resolveCenterMovementMode(for drawerSide: DrawerSide) -> CenterMovementMode {
+        guard #available(iOS 27.1, *) else {
+            return .frame
+        }
+
+        let isRightToLeft = self.view.effectiveUserInterfaceLayoutDirection == .rightToLeft
+        let isVerticalBarOnLeftEdge: Bool
+        switch self.traitCollection.verticalBarEdge {
+        case .leading:
+            isVerticalBarOnLeftEdge = !isRightToLeft
+        case .trailing:
+            isVerticalBarOnLeftEdge = isRightToLeft
+        default:
+            return .frame
+        }
+
+        switch drawerSide {
+        case .left:
+            return isVerticalBarOnLeftEdge ? .transform : .frame
+        case .right:
+            return isVerticalBarOnLeftEdge ? .frame : .transform
+        case .none:
+            return .frame
+        }
+    }
+
+    /// UIKit is not notified of layer.transform changes and may evaluate layout with the transform applied,
+    /// leaving the vertical bar suppressed or scroll indicators misplaced. Re-evaluates on the next run loop.
+    fileprivate func setNeedsLayoutReevaluation() {
+        guard self.centerMovementMode == .transform, self.isLayoutReevaluationScheduled == false else {
+            return
+        }
+        self.isLayoutReevaluationScheduled = true
+
+        // UIKit evaluates after this call, so wait for the next run loop.
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else {
+                return
+            }
+            self.isLayoutReevaluationScheduled = false
+            guard self.centerMovementMode == .transform, self.animatingDrawer == false else {
+                return
+            }
+            self.reevaluateLayout()
+        }
+    }
+
+    /// Nudges the center frames with the transform removed so UIKit evaluates their layout again.
+    /// Nudging only the container is not enough for UIKit to restore the vertical bar while the drawer is open.
+    fileprivate func reevaluateLayout() {
+        guard let centerViewController = self.centerViewController, centerViewController.isViewLoaded else {
+            return
+        }
+
+        self.isReevaluatingLayout = true
+        defer {
+            self.isReevaluatingLayout = false
+        }
+
+        let centerView: UIView = centerViewController.view
+        UIView.performWithoutAnimation {
+            let currentTransform = self.centerContainerView.layer.transform
+            self.centerContainerView.layer.transform = CATransform3DIdentity
+
+            func nudge(_ view: UIView) {
+                let originalFrame = view.frame
+                view.frame = originalFrame.offsetBy(dx: 1.0, dy: 0.0)
+                view.layoutIfNeeded()
+                view.frame = originalFrame
+            }
+            nudge(self.centerContainerView)
+            nudge(centerView)
+
+            if #available(iOS 17.0, *) {
+                centerViewController.updateTraitsIfNeeded()
+            }
+            centerView.setNeedsLayout()
+            self.view.setNeedsLayout()
+            self.view.layoutIfNeeded()
+
+            self.centerContainerView.layer.transform = currentTransform
+        }
+    }
+
+    fileprivate func handleVerticalBarEdgeChange() {
+        guard self.openSide != .none, self.animatingDrawer == false else {
+            return
+        }
+
+        self.updateCenterMovementMode(for: self.openSide)
+        self.setNeedsLayoutReevaluation()
+    }
+
+    /// The center's traits can change without the drawer controller's own traits changing.
+    fileprivate func handleCenterTraitChange() {
+        guard #available(iOS 27.1, *), self.isReevaluatingLayout == false, let centerViewController = self.centerViewController else {
+            return
+        }
+
+        let isSuppressed = self.traitCollection.verticalBarEdge != .unspecified
+            && centerViewController.traitCollection.verticalBarEdge == .unspecified
+        guard isSuppressed else {
+            return
+        }
+        self.setNeedsLayoutReevaluation()
+    }
+
+    fileprivate func registerVerticalBarTraitChanges() {
+        guard #available(iOS 27.1, *) else {
+            return
+        }
+
+        self.registerForTraitChanges(UITraitCollection.systemTraitsAffectingVerticalBarEdge) { (drawerController: DrawerController, _: UITraitCollection) in
+            drawerController.handleVerticalBarEdgeChange()
+        }
+    }
+
+    fileprivate func registerCenterTraitChanges(oldCenterViewController: UIViewController?) {
+        guard #available(iOS 27.1, *) else {
+            return
+        }
+
+        if let registration = self.centerTraitChangeRegistration as? UITraitChangeRegistration {
+            oldCenterViewController?.unregisterForTraitChanges(registration)
+        }
+        self.centerTraitChangeRegistration = self.centerViewController?.registerForTraitChanges(UITraitCollection.systemTraitsAffectingVerticalBarEdge) { [weak self] (_: UIViewController, _: UITraitCollection) in
+            self?.handleCenterTraitChange()
+        }
+    }
+
+    #else
+
+    fileprivate func resolveCenterMovementMode(for drawerSide: DrawerSide) -> CenterMovementMode {
+        return .frame
+    }
+
+    fileprivate func setNeedsLayoutReevaluation() {}
+
+    fileprivate func registerVerticalBarTraitChanges() {}
+
+    fileprivate func registerCenterTraitChanges(oldCenterViewController: UIViewController?) {}
+
+    #endif
+
     /**
      The current open side of the drawer.
 
@@ -380,7 +572,7 @@ open class DrawerController: UIViewController, UIGestureRecognizerDelegate {
         }
     }
 
-    fileprivate var startingPanRect: CGRect = CGRect.null
+    fileprivate var startingPanOffsetX: CGFloat = 0.0
 
     /**
      Sets a callback to be called when a gesture has been completed.
@@ -554,7 +746,7 @@ open class DrawerController: UIViewController, UIGestureRecognizerDelegate {
     // MARK: - Animation helpers
 
     fileprivate func finishAnimationForPanGesture(withXVelocity xVelocity: CGFloat, completion: ((Bool) -> Void)?) {
-        var currentOriginX = self.centerContainerView.frame.minX
+        let currentOffsetX = self.centerOffsetX
         let animationVelocity = max(abs(xVelocity), DrawerPanVelocityXAnimationThreshold * 2)
 
         if self.openSide == .left {
@@ -564,20 +756,19 @@ open class DrawerController: UIViewController, UIGestureRecognizerDelegate {
                 self.openDrawerSide(.left, animated: true, velocity: animationVelocity, animationOptions: [], completion: completion)
             } else if xVelocity < -DrawerPanVelocityXAnimationThreshold {
                 self.closeDrawer(animated: true, velocity: animationVelocity, animationOptions: [], completion: completion)
-            } else if currentOriginX < midPoint {
+            } else if currentOffsetX < midPoint {
                 self.closeDrawer(animated: true, completion: completion)
             } else {
                 self.openDrawerSide(.left, animated: true, completion: completion)
             }
         } else if self.openSide == .right {
-            currentOriginX = self.centerContainerView.frame.maxX
-            let midPoint = (self.childControllerContainerView.bounds.width - self.maximumRightDrawerWidth) + (self.maximumRightDrawerWidth / 2.0)
+            let midPoint = -self.maximumRightDrawerWidth / 2.0
 
             if xVelocity > DrawerPanVelocityXAnimationThreshold {
                 self.closeDrawer(animated: true, velocity: animationVelocity, animationOptions: [], completion: completion)
             } else if xVelocity < -DrawerPanVelocityXAnimationThreshold {
                 self.openDrawerSide(.right, animated: true, velocity: animationVelocity, animationOptions: [], completion: completion)
-            } else if currentOriginX > midPoint {
+            } else if currentOffsetX > midPoint {
                 self.closeDrawer(animated: true, completion: completion)
             } else {
                 self.openDrawerSide(.right, animated: true, completion: completion)
@@ -624,14 +815,14 @@ open class DrawerController: UIViewController, UIGestureRecognizerDelegate {
     fileprivate func roundedOriginX(forDrawerConstraints originX: CGFloat) -> CGFloat {
         if originX < -self.maximumRightDrawerWidth {
             if self.shouldStretchDrawer && self.rightDrawerViewController != nil {
-                let maxOvershoot: CGFloat = (self.centerContainerView.frame.width - self.maximumRightDrawerWidth) * DrawerOvershootPercentage
+                let maxOvershoot: CGFloat = (self.centerContainerView.bounds.width - self.maximumRightDrawerWidth) * DrawerOvershootPercentage
                 return self.originX(forDrawerOriginX: originX, andTargetOriginOffset: -self.maximumRightDrawerWidth, maxOvershoot: maxOvershoot)
             } else {
                 return -self.maximumRightDrawerWidth
             }
         } else if originX > self.maximumLeftDrawerWidth {
             if self.shouldStretchDrawer && self.leftDrawerViewController != nil {
-                let maxOvershoot = (self.centerContainerView.frame.width - self.maximumLeftDrawerWidth) * DrawerOvershootPercentage;
+                let maxOvershoot = (self.centerContainerView.bounds.width - self.maximumLeftDrawerWidth) * DrawerOvershootPercentage;
                 return self.originX(forDrawerOriginX: originX, andTargetOriginOffset: self.maximumLeftDrawerWidth, maxOvershoot: maxOvershoot)
             } else {
                 return self.maximumLeftDrawerWidth
@@ -802,11 +993,10 @@ open class DrawerController: UIViewController, UIGestureRecognizerDelegate {
             let duration: TimeInterval = animated ? self.animationDuration(forAnimationDistance: distance) : 0.0
 
             if self.openSide == drawerSide {
-                var newCenterRect = self.centerContainerView.frame
-                newCenterRect.origin.x = CGFloat(drawerSideOriginCorrection) * width
+                let newCenterOffsetX = CGFloat(drawerSideOriginCorrection) * width
 
                 UIView.animate(withDuration: duration, delay: 0.0, usingSpringWithDamping: self.drawerDampingFactor, initialSpringVelocity: self.animationVelocity / distance, options: [], animations: { () -> Void in
-                    self.centerContainerView.frame = newCenterRect
+                    self.centerOffsetX = newCenterOffsetX
                     sideDrawerViewController.view.frame = sideDrawerViewController.evo_visibleDrawerFrame
                 }, completion: { (finished) -> Void in
                     completion?(finished)
@@ -884,7 +1074,8 @@ open class DrawerController: UIViewController, UIGestureRecognizerDelegate {
             return
         }
 
-        if let oldCenterViewController = self._centerViewController {
+        let oldCenterViewController = self._centerViewController
+        if let oldCenterViewController = oldCenterViewController {
             oldCenterViewController.willMove(toParent: nil)
 
             oldCenterViewController.beginAppearanceTransition(false, animated: animated)
@@ -896,6 +1087,7 @@ open class DrawerController: UIViewController, UIGestureRecognizerDelegate {
         }
 
         self._centerViewController = centerViewController
+        self.registerCenterTraitChanges(oldCenterViewController: oldCenterViewController)
 
         if self._centerViewController != nil {
             self.addChild(self._centerViewController!)
@@ -981,10 +1173,8 @@ open class DrawerController: UIViewController, UIGestureRecognizerDelegate {
                 targetClosePoint = self.childControllerContainerView.bounds.width
             }
 
-            let distance: CGFloat = abs(self.centerContainerView.frame.origin.x - targetClosePoint)
+            let distance: CGFloat = abs(self.centerOffsetX - targetClosePoint)
             let firstDuration = self.animationDuration(forAnimationDistance: distance)
-
-            var newCenterRect = self.centerContainerView.frame
 
             self.animatingDrawer = animated
 
@@ -994,15 +1184,13 @@ open class DrawerController: UIViewController, UIGestureRecognizerDelegate {
                 oldCenterViewController?.beginAppearanceTransition(false, animated: animated)
             }
 
-            newCenterRect.origin.x = targetClosePoint
-
             UIView.animate(withDuration: firstDuration, delay: 0.0, usingSpringWithDamping: self.drawerDampingFactor, initialSpringVelocity: distance / self.animationVelocity, options: [], animations: { () -> Void in
-                self.centerContainerView.frame = newCenterRect
+                self.centerOffsetX = targetClosePoint
                 sideDrawerViewController?.view.frame = self.childControllerContainerView.bounds
             }, completion: { (finished) -> Void in
-                let oldCenterRect = self.centerContainerView.frame
+                let oldCenterOffsetX = self.centerOffsetX
                 self.setCenter(newCenterViewController, animated: animated)
-                self.centerContainerView.frame = oldCenterRect
+                self.centerOffsetX = oldCenterOffsetX
                 self.updateDrawerVisualState(for: self.openSide, fractionVisible: 1.0)
 
                 if forwardAppearanceMethodsToCenterViewController {
@@ -1013,7 +1201,7 @@ open class DrawerController: UIViewController, UIGestureRecognizerDelegate {
                 sideDrawerViewController?.beginAppearanceTransition(false, animated: animated)
 
                 UIView.animate(withDuration: self.animationDuration(forAnimationDistance: self.childControllerContainerView.bounds.width), delay: DrawerDefaultFullAnimationDelay, usingSpringWithDamping: self.drawerDampingFactor, initialSpringVelocity: self.childControllerContainerView.bounds.width / self.animationVelocity, options: [], animations: { () -> Void in
-                    self.centerContainerView.frame = self.childControllerContainerView.bounds
+                    self.centerOffsetX = 0.0
                     self.updateDrawerVisualState(for: self.openSide, fractionVisible: 0.0)
                 }, completion: { (finished) -> Void in
                     if forwardAppearanceMethodsToCenterViewController {
@@ -1030,6 +1218,7 @@ open class DrawerController: UIViewController, UIGestureRecognizerDelegate {
 
                     self.openSide = .none
                     self.animatingDrawer = false
+                    self.setNeedsLayoutReevaluation()
 
                     completion?(finished)
                 })
@@ -1120,15 +1309,12 @@ open class DrawerController: UIViewController, UIGestureRecognizerDelegate {
             if self.animatingDrawer {
                 panGesture.isEnabled = false
             } else {
-                self.startingPanRect = self.centerContainerView.frame
+                self.startingPanOffsetX = self.centerOffsetX
             }
         case .changed:
             self.view.isUserInteractionEnabled = false
-            var newFrame = self.startingPanRect
-            let translatedPoint = panGesture.translation(in: self.centerContainerView)
-            newFrame.origin.x = self.roundedOriginX(forDrawerConstraints: self.startingPanRect.minX + translatedPoint.x)
-            newFrame = newFrame.integral
-            let xOffset = newFrame.origin.x
+            let translatedPoint = panGesture.translation(in: self.childControllerContainerView)
+            let xOffset = self.roundedOriginX(forDrawerConstraints: self.startingPanOffsetX + translatedPoint.x).rounded(.down)
 
             var visibleSide: DrawerSide = .none
             var fractionVisible: CGFloat = 0.0
@@ -1153,15 +1339,15 @@ open class DrawerController: UIViewController, UIGestureRecognizerDelegate {
                     self.prepareToPresentDrawer(for: visibleSide, animated: false)
                     visibleSideDrawerViewController.endAppearanceTransition()
                     self.openSide = visibleSide
+                    self.updateCenterMovementMode(for: visibleSide)
                 } else if visibleSide == .none {
                     self.openSide = .none
                 }
 
                 self.updateDrawerVisualState(for: visibleSide, fractionVisible: fractionVisible)
-                self.centerContainerView.frame.origin.x = newFrame.origin.x
+                self.centerOffsetX = xOffset
             }
         case .ended, .cancelled:
-            self.startingPanRect = CGRect.null
             let velocity = panGesture.velocity(in: self.childControllerContainerView)
             self.finishAnimationForPanGesture(withXVelocity: velocity.x) { finished in
                 if self.gestureCompletionBlock != nil {
@@ -1244,23 +1430,15 @@ open class DrawerController: UIViewController, UIGestureRecognizerDelegate {
             }
 
             if sideDrawerViewController != nil {
-                var newFrame: CGRect
-                let oldFrame = self.centerContainerView.frame
+                self.updateCenterMovementMode(for: drawerSide)
+                let newOffsetX = drawerSide == .left ? self._maximumLeftDrawerWidth : -self._maximumRightDrawerWidth
 
-                if drawerSide == .left {
-                    newFrame = self.centerContainerView.frame
-                    newFrame.origin.x = self._maximumLeftDrawerWidth
-                } else {
-                    newFrame = self.centerContainerView.frame
-                    newFrame.origin.x = 0 - self._maximumRightDrawerWidth
-                }
-
-                let distance = abs(oldFrame.minX - newFrame.origin.x)
+                let distance = abs(self.centerOffsetX - newOffsetX)
                 let duration: TimeInterval = animated ? TimeInterval(max(distance / abs(velocity), minimumAnimationDuration)) : 0.0
 
                 UIView.animate(withDuration: duration, delay: 0.0, usingSpringWithDamping: self.drawerDampingFactor, initialSpringVelocity: velocity / distance, options: options, animations: { () -> Void in
                     self.setNeedsStatusBarAppearanceUpdate()
-                    self.centerContainerView.frame = newFrame
+                    self.centerOffsetX = newOffsetX
                     self.updateDrawerVisualState(for: drawerSide, fractionVisible: 1.0)
                 }, completion: { (finished) -> Void in
                     if drawerSide != self.openSide {
@@ -1294,24 +1472,21 @@ open class DrawerController: UIViewController, UIGestureRecognizerDelegate {
             completion?(false)
         } else {
             self.animatingDrawer = animated
-            let newFrame = self.childControllerContainerView.bounds
-
-            let distance = abs(self.centerContainerView.frame.minX)
+            let centerOffsetX = self.centerOffsetX
+            let distance = abs(centerOffsetX)
             let duration: TimeInterval = animated ? TimeInterval(max(distance / abs(velocity), minimumAnimationDuration)) : 0.0
 
-            let leftDrawerVisible = self.centerContainerView.frame.minX > 0
-            let rightDrawerVisible = self.centerContainerView.frame.minX < 0
+            let leftDrawerVisible = centerOffsetX > 0
+            let rightDrawerVisible = centerOffsetX < 0
 
             var visibleSide: DrawerSide = .none
             var fractionVisible: CGFloat = 0.0
 
             if leftDrawerVisible {
-                let visibleDrawerPoint = self.centerContainerView.frame.minX
-                fractionVisible = max(0.0, visibleDrawerPoint / self._maximumLeftDrawerWidth)
+                fractionVisible = max(0.0, centerOffsetX / self._maximumLeftDrawerWidth)
                 visibleSide = .left
             } else if rightDrawerVisible {
-                let visibleDrawerPoints = self.centerContainerView.frame.width - self.centerContainerView.frame.maxX
-                fractionVisible = max(0.0, visibleDrawerPoints / self._maximumRightDrawerWidth)
+                fractionVisible = max(0.0, -centerOffsetX / self._maximumRightDrawerWidth)
                 visibleSide = .right
             }
 
@@ -1322,13 +1497,14 @@ open class DrawerController: UIViewController, UIGestureRecognizerDelegate {
 
             UIView.animate(withDuration: duration, delay: 0.0, usingSpringWithDamping: self.drawerDampingFactor, initialSpringVelocity: velocity / distance, options: options, animations: { () -> Void in
                 self.setNeedsStatusBarAppearanceUpdate()
-                self.centerContainerView.frame = newFrame
+                self.centerOffsetX = 0.0
                 self.updateDrawerVisualState(for: visibleSide, fractionVisible: 0.0)
             }, completion: { (finished) -> Void in
                 sideDrawerViewController?.endAppearanceTransition()
                 self.openSide = .none
                 self.resetDrawerVisualState(for: visibleSide)
                 self.animatingDrawer = false
+                self.setNeedsLayoutReevaluation()
                 completion?(finished)
             })
         }
@@ -1342,6 +1518,27 @@ open class DrawerController: UIViewController, UIGestureRecognizerDelegate {
         self.view.backgroundColor = UIColor.black
 
         self.setupGestureRecognizers()
+
+        self.registerVerticalBarTraitChanges()
+    }
+
+    open override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+
+        // autoresizingMask handles the frame mode.
+        guard self.centerMovementMode == .transform else {
+            return
+        }
+
+        // Keep the center view sized to its container while the transform is applied.
+        let bounds = self.childControllerContainerView.bounds
+        let center = CGPoint(x: bounds.midX, y: bounds.midY)
+        if self.centerContainerView.bounds.size != bounds.size {
+            self.centerContainerView.bounds.size = bounds.size
+        }
+        if self.centerContainerView.center != center {
+            self.centerContainerView.center = center
+        }
     }
 
     open override func viewWillAppear(_ animated: Bool) {
@@ -1554,7 +1751,7 @@ open class DrawerController: UIViewController, UIGestureRecognizerDelegate {
     }
 
     func isPointContained(withinCenterViewContentRect point: CGPoint) -> Bool {
-        var centerViewContentRect = self.centerContainerView.frame
+        var centerViewContentRect = self.centerContainerView.convert(self.centerContainerView.bounds, to: self.childControllerContainerView)
         centerViewContentRect = centerViewContentRect.intersection(self.childControllerContainerView.bounds)
 
         return centerViewContentRect.contains(point) && self.isPointContained(withinNavigationRect: point) == false
