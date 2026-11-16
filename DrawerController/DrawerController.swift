@@ -489,7 +489,8 @@ open class DrawerController: UIViewController, UIGestureRecognizerDelegate {
 
         // Nudging away from the vertical bar's edge suppresses the bar for a moment, which also shows bars hidden on scroll.
         // While open, that suppression is what makes UIKit restore the bar. After closing, nudge toward the edge instead.
-        let nudgeX: CGFloat = self.openSide == .none ? self.directionTowardVerticalBarEdge() : 1.0
+        let toward = self.directionTowardVerticalBarEdge()
+        let nudgeX: CGFloat = self.openSide == .none ? toward : -toward
         let centerView: UIView = centerViewController.view
         UIView.performWithoutAnimation {
             let currentTransform = self.centerContainerView.layer.transform
